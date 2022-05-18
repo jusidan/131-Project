@@ -1,0 +1,394 @@
+---
+title: "PSTAT131_FinalProject"
+author: "Justin Chan & Brandon Lee"
+date: "12/2/2021"
+output: pdf_document
+---
+
+## Partners: Justin Chan (6645626) and Brandon Lee (3263324)
+## PSTAT 131
+
+```{r setup, include = FALSE}
+library(tidyverse) 
+library(ISLR) 
+library(glmnet) 
+library(tree) 
+library(maptree) 
+library(randomForest) 
+library(gbm) 
+library(ROCR)
+library(maps)
+library(ggplot2)
+library(knitr)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+
+## Data
+
+## Census Data
+```{r, message = FALSE}
+state.name <- c(state.name, "District of Columbia")
+state.abb <- c(state.abb, "DC")
+## read in census data
+census <- read_csv("~/Desktop/classes/fall 2021/pstat 131/acs2017_county_data.csv") %>% select(-CountyId, -ChildPoverty, -Income, -IncomeErr, -IncomePerCap, -IncomePerCapErr) %>% mutate(State = state.abb[match(`State`, state.name)]) %>% 
+      filter(State != "PR")
+```
+
+## Education Data
+```{r}
+## read in education data
+education <- read_csv("~/Desktop/classes/fall 2021/pstat 131/education.csv") %>%
+  filter(!is.na(`2003 Rural-urban Continuum Code`)) %>%
+  filter(State != "PR") %>% select(-`FIPS Code`,-`2003 Rural-urban Continuum Code`, -`2003 Urban Influence Code`,-`2013 Rural-urban Continuum Code`, -`2013 Urban Influence Code`) %>%
+  rename(County = `Area name`)
+```
+
+## Preliminary Data Analysis
+
+### 1)
+```{r}
+dim(census)
+sum(apply(is.na(census[]), 1, any))
+length(unique(census$State))
+```
+
+### 2)
+```{r}
+dim(education)
+sum(apply(is.na(education[]), 1, any))
+# Number of distinct County in education
+length(unique(education$County))
+# Number of distinct County in census
+length(unique(census$County))
+```
+
+### 3)
+```{r}
+education <- na.omit(education)
+```
+
+### 4)
+```{r}
+education <- education %>% select(State, County, `Less than a high school diploma, 2015-19`, `High school diploma only, 2015-19`, `Some college or associate's degree, 2015-19`, `Bachelor's degree or higher, 2015-19`) %>% mutate(Total_Population = rowSums(education[,35:38]))
+```
+
+### 5)
+```{r}
+education.state <- aggregate(education[,3:6], by = list(education$State), FUN = sum)
+```
+
+### 6)
+```{r}
+column_levels = colnames(education.state)[apply(education.state,1,which.max)]
+
+state.level <- cbind(education.state, state_level = column_levels)
+```
+
+## Visualization
+```{r}
+states <- map_data("state")
+ggplot(data = states) +geom_polygon(aes(x = long, y = lat, fill = region, group = group),color = "white") +coord_fixed(1.3) +
+guides(fill=FALSE) # color legend is unnecessary for this example and takes too long
+```
+
+### 7)
+```{r}
+state.level <- state.level %>% mutate(Group.1 = state.name[match(state.level$Group.1, state.abb)])
+state.level$Group.1 <- tolower(state.level$Group.1)
+state.merge <- states %>% left_join(state.level, by=  c("region" = "Group.1"))
+ggplot(data = state.merge) +geom_polygon(aes(x = long, y = lat, fill = state_level, group = group),color = "white") + coord_fixed(1.3)
+```
+
+
+### 8)
+```{r}
+ggplot(census, aes(x=TotalPop, y=Employed, color= State)) + geom_point(size=6)
+```
+
+_Answer:_ We plotted a scatter plot illustrating the number of employed individual compared to the total population of each of the states.
+
+### 9)
+```{r}
+#filters out missing values
+census.clean <- na.omit(census) 
+
+census.clean <- census.clean %>% mutate(Men = Men / TotalPop, Employed = Employed / TotalPop, VotingAgeCitizen = VotingAgeCitizen / TotalPop) %>% mutate("Minority" = Hispanic + Black + Native + Asian + Pacific) %>% select(-Hispanic, -Black, -Native, -Asian, - Pacific, -Walk, -PublicWork, -Construction, -Unemployment)
+```
+
+### 10)
+```{r}
+head(census.clean, 5)
+```
+
+## Dimensionality Reduction
+### 11)
+```{r}
+# run PCA for cleaned county level census data
+pr.census = prcomp(census.clean[,-c(1:2)], scale = TRUE, center = TRUE)
+# we chose to center and scale the features before running PCA in order to normalize the data so that each feature has the same weight
+
+# save PC1 and PC2 into two-column data frame
+PC1 = pr.census$x[, 1]
+PC2 = pr.census$x[, 2]
+pc.county = data.frame(PC1, PC2)
+
+# find three features with largest absolute values of PC1
+PC1_loading = sort(abs(pr.census$rotation[, c(1)]), decreasing = TRUE)
+head(PC1_loading, n = 3)
+# three features with largest absolute values of first principal component are WorkAtHome, SelfEmployed, and Minority
+
+# find features that have opposite signs
+diffsign = data.frame(pr.census$rotation[, 1], pr.census$rotation[, 2])
+rows = c()
+for (i in c(1:21)) {
+  if (sign(diffsign[i, 1]) == sign(diffsign[i, 2])) {
+    rows = c(rows, i)
+  }
+}
+diffsign = diffsign [-c(rows),]
+diffsign
+```
+
+_Answer:_ The features with opposite signs are TotalPop, Women, White, VotingAgeCitizen, Poverty, Service, Office, Carpool, Transit, and Minority. This means that there is a negative correlation between these features when taking PC1 and PC2.
+
+### 12)
+```{r}
+pr.var = pr.census$sdev^2
+pve = pr.var/sum(pr.var)
+
+# plot PVE
+plot(pve, xlab = "Principal Component", ylab = "Proportion of Variance Explained", type = "b")
+
+# plot Cumulative PVE
+plot(cumsum(pve), xlab = "Principal Component", ylab = "Cumulative Proportion of Variance Explained", type = "b")
+
+# determine minimum number of PCs needed to capture 90% of variance for the analysis
+bool_cumsum = ifelse(cumsum(pve) > 0.9, TRUE, FALSE)
+min(which(cumsum(bool_cumsum) == TRUE))
+# We need 12 PCs in order to explain 90% of the total variation in the data
+```
+
+
+## Clustering
+### 13)
+```{r}
+# compute a euclidean distance matrix between the subjects
+census.clean.dist = dist(census.clean[, -c(1:2)])
+
+# run hierarchical clustering using complete linkage
+set.seed(123)
+census.clean.hclust = hclust(census.clean.dist)
+
+# cut the tree to partition the observations into 10 clusters
+clus1 = cutree(census.clean.hclust, 10)
+table(clus1)
+
+# re-run hierarchical clustering w first 2 PC's from pc.county
+pc.county.dist = dist(pc.county)
+pc.county.hclust = hclust(pc.county.dist)
+clus2 = cutree(pc.county.hclust, 10)
+table(clus2)
+which(census.clean$County == "Santa Barbara County")
+clus1[228]
+clus2[228]
+```
+
+
+## Modeling
+```{r}
+all <- census.clean %>%left_join(education, by = c("State"="State", "County"="County")) %>%
+  na.omit
+```
+
+### 14)
+```{r}
+all <- all %>% mutate(Poverty = factor(ifelse(Poverty > 20, 1, 0))) %>% select(-State, -County)
+all
+```
+
+```{r}
+# Partition the dataset into 80% training and 20% test data
+set.seed(123)
+n <- nrow(all)
+idx.tr <- sample.int(n, 0.8*n)
+all.tr <- all[idx.tr, ]
+all.te <- all[-idx.tr, ]
+
+# define 10 cross-validation folds
+set.seed(123)
+nfold <- 10
+folds <- sample(cut(1:nrow(all.tr), breaks=nfold, labels=FALSE))
+
+# Error rate function
+calc_error_rate = function(predicted.value, true.value){ 
+  return(mean(true.value!=predicted.value))
+}
+
+# Creating records matrix
+records = matrix(NA, nrow=3, ncol=2)
+colnames(records) = c("train.error","test.error")
+rownames(records) = c("tree","logistic","lasso")
+```
+
+## Classification
+### 15)
+```{r}
+# Decision Tree
+all.tr.df <- data.frame(all.tr)
+all.te.df <- data.frame(all.te)
+colnames(all.tr.df)[22:25] <- c("LessThanHighschool", "Highschool", "College", "Bachelors")
+colnames(all.te.df)[22:25] <- c("LessThanHighschool", "Highschool", "College", "Bachelors")
+all.tree = tree(Poverty ~ ., data = all.tr.df)
+summary(all.tree)
+
+# Drawing out tree
+draw.tree(all.tree, nodeinfo = TRUE, cex = 0.5)
+title("Tree")
+
+# Cross-validation
+cv.tree <- cv.tree(all.tree, FUN =prune.misclass, rand = folds)
+best.cv = min(cv.tree$size[cv.tree$dev == min(cv.tree$dev)])
+prune.tree = prune.tree(all.tree, best = best.cv)
+
+# Drawing prune tree
+draw.tree(prune.tree, nodeinfo = TRUE, cex = 0.5)
+title("Prune Tree")
+
+set.seed(123)
+test.pred.prune.tree = predict(prune.tree, all.te.df, type = "class")
+train.pred.prune.tree = predict(prune.tree, all.tr.df, type = "class")
+
+records[1,1] = calc_error_rate(train.pred.prune.tree, all.tr.df$Poverty)
+records[1,2] = calc_error_rate(test.pred.prune.tree, all.te.df$Poverty)
+records
+```
+
+### 16)
+```{r}
+# run a logistic regression to predict poverty in each county
+all.trx = all.tr %>% select(-Poverty)
+all.try = all.tr$Poverty
+all.tex = all.te %>% select(-Poverty)
+all.tey = all.te$Poverty
+glm.fit = glm(Poverty ~ ., data = all.tr, family = binomial)
+summary(glm.fit)
+
+fit.train = predict(glm.fit, all.trx, type = "response")
+train.pred.glm = rep("0", length(all.try))
+train.pred.glm[fit.train >= 0.5] = "1"
+
+fit.test = predict(glm.fit, all.tex, type = "response")
+test.pred.glm = rep("0", length(all.tey))
+test.pred.glm[fit.test > 0.5] = "1"
+
+# save training and test errors to records variable
+records[2,1] = calc_error_rate(train.pred.glm, all.try)
+records[2,2] = calc_error_rate(test.pred.glm, all.tey)
+records
+```
+_Answer:_ The variables production; private work; less than a high school diploma, 1990; high school diploma only, 1990; and bachelor's degree or higher, 2015-19 are all statistically significant at level 0.01.
+
+_Answer:_ The variable production has a coefficient 5.797e-02, which means for every one unit change in production, the log odds of being in poverty increases by 5.797e-02, holding other variables fixed. Similarly the variable private work has a coefficient -4.570e-02, which means for every one unit change in private work, the log odds of being in poverty decreases by 4.570e-02, holding other variables fixed.
+
+### 17)
+```{r}
+set.seed(123)
+lambda.equ = seq(1,20) * 1e-5
+dat = model.matrix(Poverty ~ ., data = all)
+x.train = dat[idx.tr,]
+x.test = dat[-idx.tr,]
+
+lasso.cv = cv.glmnet(x.train, all.tr$Poverty, alpha = 1, nfolds = 10, lambda = lambda.equ,family = "binomial")
+best.lam = lasso.cv$lambda.min
+best.lam
+
+log.lasso = glmnet(dat, all$Poverty, alpha=1, nfolds = 10, lambda = best.lam, family = "binomial")
+coef(log.lasso)
+
+lasso.train = predict(log.lasso, s = best.lam, newx = x.train)
+train.pred.lasso = ifelse(lasso.train > 0.5, "1", "0")
+lasso.test = predict(log.lasso,newx = x.test,s= best.lam)
+test.pred.lasso = ifelse(lasso.test > 0.5, "1", "0")
+
+lasso.test.error = calc_error_rate(test.pred.lasso, all.te$Poverty)
+lasso.train.error = calc_error_rate(train.pred.lasso, all.tr$Poverty)
+
+
+records[3,2]= lasso.test.error
+records[3,1] = lasso.train.error
+records
+```
+
+### 18)
+```{r}
+colnames(all.tex)[21:24] <- c("LessThanHighschool", "Highschool", "College", "Bachelors")
+
+# compute ROC curves for decision tree, logistic regression, and lasso logistic regression
+pruned.pred.tree = predict(prune.tree, all.tex, type = "class")
+pred.tree = prediction(as.numeric(pruned.pred.tree), as.numeric(all.tey))
+pred.log = prediction(as.numeric(fit.test), as.numeric(all.tey))
+pred.lasso = prediction(lasso.test, as.numeric(all.tey))
+tree.perf = performance(pred.tree, measure = "tpr", x.measure = "fpr")
+log.perf = performance(pred.log, measure = "tpr", x.measure = "fpr")
+lasso.perf = performance(pred.lasso, measure = "tpr", x.measure = "fpr")
+plot(tree.perf, col = "red", lwd = 3, main = "ROC Curves")
+plot(log.perf, col = "blue", lty = 4, lwd = 3, main = "ROC Curves", add = TRUE)
+plot(lasso.perf, col = "green", lty = 3, lwd = 3, main = "ROC Curves", add = TRUE)
+legend("bottomright", legend = c("Decision Tree", "Logistic Regression", "Lasso"), col = c("red", "blue", "green"), lty = (1:2))
+```
+
+### 19)
+```{r}
+# Random Forest
+set.seed(123)
+bag.poverty = randomForest(Poverty ~ ., data = all.tr.df, importance = TRUE)
+bag.poverty
+plot(bag.poverty)
+legend("top", colnames(bag.poverty$err.rate), col=1:4, cex = 0.8, fill=1:4)
+
+yhat.bag = predict(bag.poverty, newdata = all.te.df, type = "response")
+test.bag.error = mean(yhat.bag != all.te.df$Poverty)
+test.bag.error
+
+# Boosting
+boost.poverty = gbm(ifelse(Poverty == "1", 1, 0) ~ ., data = all.tr.df, distribution = "bernoulli", n.trees = 500, interaction.depth = 2)
+summary(boost.poverty)
+yhat.boost = predict(boost.poverty, newdata = all.te.df, n.trees = 500, type = "response")
+yhat.boost = ifelse(yhat.boost > 0.5, 1, 0)
+test.boost.error = mean(yhat.boost != ifelse(all.te.df$Poverty == "1", 1, 0))
+test.boost.error
+```
+_Answer:_ The test errors for random forest and boosting are 0.12 and 0.136, respectively. These values are both lower than the test error for tree, and are around the same as logistic and lasso.
+
+### 20)
+```{r}
+all_regression <- census.clean %>%left_join(education, by = c("State"="State", "County"="County")) %>%
+  na.omit
+all_regression <- all_regression %>% select(-State, -County)
+model1 <- lm(Poverty ~ ., data = all_regression)
+summary(model1)
+plot(model1)
+test_MSE = mean((all_regression$Poverty - predict.lm(model1, all_regression))^2)
+test_MSE
+```
+_Answer:_ For question 20, we decided to use a linear regression model to predict poverty for each county given all the other predictor variables. We calculated an adjusted R-squared value of 0.666 and a test MSE of 14.22317. We also got a p-value of 2.2e-16 and a large F-statistic of 260.3. While this model is one option, we prefer the other classification models used as they are better suited to analyze such a large amount of variables.
+
+### 21)
+```{r}
+fullrecords = matrix(NA, nrow=5, ncol=2)
+colnames(fullrecords) = c("train.error","test.error")
+rownames(fullrecords) = c("tree","logistic","lasso", "Random Forest", "Boosting")
+
+fullrecords[1,1] = calc_error_rate(train.pred.prune.tree, all.tr.df$Poverty)
+fullrecords[1,2] = calc_error_rate(test.pred.prune.tree, all.te.df$Poverty)
+fullrecords[2,1] = calc_error_rate(train.pred.glm, all.try)
+fullrecords[2,2] = calc_error_rate(test.pred.glm, all.tey)
+fullrecords[3,2]= lasso.test.error
+fullrecords[3,1] = lasso.train.error
+fullrecords[4,2] = test.bag.error
+fullrecords[5,2] = test.boost.error
+fullrecords
+sprintf("Test MSE for Linear Regression: %s", test_MSE)
+```
+_Answer:_ When looking at the training and test errors for each different classification model, they were all very similar besides decision trees. While random forest had the lowest test error, we believe logistic regression is a more appropriate method of classification as it is able to accommodate all of the variables. In addition, logistic regression does not require as much computation, making it a more efficient model. When trying linear regression, we found it to not be a very good model as it isn't able to represent all the different variables well. PCA would have been another option to compare with the classification models as it uses a few components to represent a large majority of the data rather than having many variables. These methods could also be used to look at different counties or even countries around the world.
